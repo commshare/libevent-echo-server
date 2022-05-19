@@ -74,9 +74,11 @@
 #endif
 #endif /* _WIN32 */
 
+#define LISTEN_PORT 40713 
+#define LISTEN_BACKLOG 32 
 
-
-void do_accept(evutil_socket_t listener, short event, void* arg);
+void on_accept(evutil_socket_t listener, short event, void* arg);
+void on_read(struct bufferevent* bev, void* arg);
 void read_cb(struct bufferevent* bev, void* arg);
 void error_cb(struct bufferevent* bev, short event, void* arg);
 void write_cb(struct bufferevent* bev, void* arg);
@@ -87,10 +89,12 @@ void write_cb(struct bufferevent* bev, void* arg);
 void
 on_read(struct bufferevent* bev, void* ctx)
 {
+
+
     struct evbuffer* input, * output;
     char* line;
     size_t n;
-   // int i;
+     // int i;
 
     input = bufferevent_get_input(bev);
     output = bufferevent_get_output(bev);
@@ -111,6 +115,38 @@ on_read(struct bufferevent* bev, void* ctx)
         evbuffer_add(output, "\n", 1);
     }
 }
+void read_cb(struct bufferevent* bev, void* arg)
+{
+#define MAX_LINE 256
+    char line[MAX_LINE + 1];
+    int n;
+    evutil_socket_t fd = bufferevent_getfd(bev);
+    while (n = bufferevent_read(bev, line, MAX_LINE), n > 0)
+    {
+        line[n] = '\0';
+        printf("fd = %u ,read line : %s \n",fd,line);
+        bufferevent_write(bev, line, n);
+    }
+}
+void write_cb(struct bufferevent* bev, void* arg) {}
+
+
+void error_cb(struct bufferevent* bev, short event, void* arg) {
+    evutil_socket_t fd = bufferevent_getfd(bev);
+    printf("fd = %u \n",fd);
+    if (event & BEV_EVENT_TIMEOUT)
+    {
+        printf("Timed out\n"); //if bufferevent_set_timeouts() called 
+    }
+    else if (event & BEV_EVENT_EOF)
+    {
+        printf("connection closed\n");
+	}
+	else if (event & BEV_EVENT_ERROR) {
+		printf("some other error\n");
+	}
+	bufferevent_free(bev);
+}
 
 void
 on_error(struct bufferevent* bev, short error, void* ctx)
@@ -128,11 +164,13 @@ void
 on_accept(evutil_socket_t listener, short event, void* arg)
 {
     struct event_base* base = (struct event_base*)arg;
-    struct sockaddr_storage ss;
+	struct sockaddr_storage ss; //or use     struct sockaddr_in sin; 
     socklen_t slen = sizeof(ss);
-    int fd = accept(listener, (struct sockaddr*)&ss, &slen);
+    evutil_socket_t fd;
+    fd = accept(listener, (struct sockaddr*)&ss, &slen);
     if (fd < 0) {
         perror("accept");
+        return;
     }
   //  else if (fd > FD_SETSIZE) {
   //      //https://blog.csdn.net/zhangxiao93/article/details/70159767
@@ -145,9 +183,10 @@ on_accept(evutil_socket_t listener, short event, void* arg)
         struct bufferevent* bev;
         evutil_make_socket_nonblocking(fd);
         bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
-        bufferevent_setcb(bev, on_read, NULL, on_error, NULL);
+        bufferevent_setcb(bev, read_cb, NULL, error_cb, NULL);
         bufferevent_setwatermark(bev, EV_READ, 0, MAX_LINE);
-        bufferevent_enable(bev, EV_READ | EV_WRITE);
+        //add |EV_PERSIST
+        bufferevent_enable(bev, EV_READ | EV_WRITE | EV_PERSIST);
     }
 }
 
@@ -176,17 +215,20 @@ main(int argc, char** argv)
     struct event_base* base;
     struct event* listener_event;
 
-    base = event_base_new();
-    if (!base)
-        return 1;
+
 
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = 0;
-    sin.sin_port = htons(40713);
+    sin.sin_port = htons(LISTEN_PORT);
 
 
     listener = socket(AF_INET, SOCK_STREAM, 0);
-    evutil_make_socket_nonblocking(listener);
+
+	assert(listener > 0);
+    //先可复用？
+	evutil_make_listen_socket_reuseable(listener);
+
+
 
     /* win32 junk? */
 
@@ -195,17 +237,29 @@ main(int argc, char** argv)
         return 1;
     }
 
+    printf("Listening...\n");
+    evutil_make_socket_nonblocking(listener);
+
     if (listen(listener, 16) < 0) {
         perror("listen");
         return 1;
     }
 
+	base = event_base_new();
+    assert(base != NULL);
+	if (!base)
+		return 1;
+
+
+
     listener_event = event_new(base, listener, EV_READ | EV_PERSIST, on_accept, (void*)base);
+    event_add(listener_event, NULL);
+
     /* check it? */
     event_add(listener_event, NULL);
 
     event_base_dispatch(base);
-
+    printf("The End.");
 
 #ifdef _WIN32
 	WSACleanup();
